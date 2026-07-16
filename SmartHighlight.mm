@@ -2,7 +2,9 @@
  * SmartHighlight.mm - Native macOS Notepad++ plugin
  *
  * Docked right-side highlight panel with persistent keyword list.
- * Storage : ~/.notepad++/plugins/Config/SmartHighlight_highlights.json  (auto)
+ * Storage : <plugins config dir>/SmartHighlight_highlights.json  (auto)
+ *           resolved via NPPM_GETPLUGINSCONFIGDIR; on Nextpad++ this is
+ *           ~/Library/Application Support/Nextpad++/plugins/Config/
  * Export  : any path with .cch extension                              (manual)
  *
  * Panel features
@@ -63,6 +65,14 @@
 #endif
 
 #import <Cocoa/Cocoa.h>
+
+// Built with manual retain/release (build.sh passes no -fobjc-arc). The pipe
+// readers below hand an object across a thread hop and retain it by hand, which
+// ARC would reject outright — so say why rather than fail cryptically.
+#if __has_feature(objc_arc)
+#error "SmartHighlight.mm expects manual retain/release; build without -fobjc-arc."
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -261,6 +271,27 @@ static NSString *ccUniqueNestedOutputDir(NSString *archivePath) {
     return candidate;
 }
 
+// Recoverable removal. Archives selected by the user (and archives unpacked out
+// of them) are their data, so they go to the Trash rather than being unlinked.
+// A failure here leaves the file in place: never fall back to a hard delete.
+// trashedPath (optional) receives where the item landed, so the caller can tell
+// the user where to recover it from.
+static bool ccTrashItemAtPath(NSString *path, NSString **trashedPath, NSString **errorText) {
+    if (path.length == 0) return false;
+    NSError *err = nil;
+    NSURL *landed = nil;
+    if ([[NSFileManager defaultManager] trashItemAtURL:[NSURL fileURLWithPath:path]
+                                      resultingItemURL:&landed
+                                                 error:&err]) {
+        if (trashedPath) *trashedPath = landed.path;
+        return true;
+    }
+    if (errorText) {
+        *errorText = err.localizedDescription ?: @"unknown error";
+    }
+    return false;
+}
+
 static bool ccRunTask(NSString *launchPath,
                       NSArray<NSString *> *args,
                       NSString **errorText) {
@@ -274,7 +305,10 @@ static bool ccRunTask(NSString *launchPath,
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = launchPath;
     task.arguments = args ?: @[];
-    task.standardOutput = [NSPipe pipe];
+    // stdout is never read here, so it must not be a pipe: a chatty tool (7z
+    // prints a line per entry) fills the 64KB pipe buffer, blocks forever, and
+    // waitUntilExit below never returns.
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
     task.standardError = errPipe;
 
     @try {
@@ -284,8 +318,9 @@ static bool ccRunTask(NSString *launchPath,
         return false;
     }
 
-    [task waitUntilExit];
+    // Drain stderr before waiting, for the same reason.
     NSData *errData = [[errPipe fileHandleForReading] readDataToEndOfFile];
+    [task waitUntilExit];
     if (task.terminationStatus != 0) {
         NSString *stderrStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
         if (stderrStr.length == 0) stderrStr = @"Unknown extraction error";
@@ -323,10 +358,23 @@ static bool ccRunTaskCapture(NSString *launchPath,
         return false;
     }
 
-    [task waitUntilExit];
-    NSData *outData = [[outPipe fileHandleForReading] readDataToEndOfFile];
+    // Both pipes must be drained concurrently, and before waiting: whichever
+    // stream is left unread blocks the child once it fills the 64KB buffer.
+    __block NSData *outData = nil;
+    dispatch_semaphore_t outDone = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            outData = [[[outPipe fileHandleForReading] readDataToEndOfFile] retain];
+        }
+        dispatch_semaphore_signal(outDone);
+    });
     NSData *errData = [[errPipe fileHandleForReading] readDataToEndOfFile];
-    NSString *out = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding] ?: @"";
+    dispatch_semaphore_wait(outDone, DISPATCH_TIME_FOREVER);
+    dispatch_release(outDone);
+    [task waitUntilExit];
+    [outData autorelease];
+
+    NSString *out = [[NSString alloc] initWithData:(outData ?: [NSData data]) encoding:NSUTF8StringEncoding] ?: @"";
     NSString *err = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] ?: @"";
 
     if (stdoutText) *stdoutText = out;
@@ -603,6 +651,23 @@ static bool ccFixDirectoryPermissions(NSString *path, NSString **errorText) {
     return ccRunTask(@"/bin/chmod", @[@"-R", @"u+w", path], errorText);
 }
 
+// Ceiling on what a single .gz is allowed to expand to. gzip reaches ~1000:1 on
+// compressible input, so an attacker-supplied member can name any size it likes.
+// Overridable so the test harness can exercise the ceiling without writing 2 GB.
+#ifndef CC_MAX_DECOMPRESSED_BYTES
+#define CC_MAX_DECOMPRESSED_BYTES (2ULL * 1024 * 1024 * 1024)
+#endif
+#ifndef CC_MAX_NESTING_DEPTH
+#define CC_MAX_NESTING_DEPTH 50
+#endif
+
+static const unsigned long long kCCMaxDecompressedBytes = CC_MAX_DECOMPRESSED_BYTES;
+static const NSUInteger         kCCGzipChunkBytes       = 1u << 20;   // 1 MB
+static const NSInteger          kCCMaxNestingDepth      = CC_MAX_NESTING_DEPTH;
+
+// The decompressed stream is written straight to disk in bounded chunks. It used
+// to be accumulated into one NSData, which put the whole expansion in RAM — and
+// this runs inside the editor, so an OOM took every unsaved tab down with it.
 static bool ccExtractGzipFile(NSString *archivePath,
                               NSString *outputDir,
                               NSString **errorText) {
@@ -612,6 +677,17 @@ static bool ccExtractGzipFile(NSString *archivePath,
 
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    if (![fm createFileAtPath:outPath contents:nil attributes:nil]) {
+        if (errorText) *errorText = [NSString stringWithFormat:@"Failed creating %@", outPath];
+        return false;
+    }
+    NSFileHandle *outFile = [NSFileHandle fileHandleForWritingAtPath:outPath];
+    if (!outFile) {
+        [fm removeItemAtPath:outPath error:nil];
+        if (errorText) *errorText = [NSString stringWithFormat:@"Failed opening %@ for writing", outPath];
+        return false;
+    }
 
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = @"/usr/bin/gzip";
@@ -624,23 +700,79 @@ static bool ccExtractGzipFile(NSString *archivePath,
     @try {
         [task launch];
     } @catch (NSException *ex) {
+        [outFile closeFile];
+        [fm removeItemAtPath:outPath error:nil];
         if (errorText) *errorText = [NSString stringWithFormat:@"Failed launching gzip: %@", ex.reason ?: @"unknown"];
         return false;
     }
 
-    NSData *data = [[outPipe fileHandleForReading] readDataToEndOfFile];
+    // stderr drained concurrently so gzip can never block writing diagnostics.
+    __block NSData *errData = nil;
+    dispatch_semaphore_t errDone = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            errData = [[[errPipe fileHandleForReading] readDataToEndOfFile] retain];
+        }
+        dispatch_semaphore_signal(errDone);
+    });
+
+    NSFileHandle *outRead = [outPipe fileHandleForReading];
+    unsigned long long total = 0;
+    // The pool below drains every iteration to bound memory, so a message built
+    // inside it is retained by hand to outlive the loop and reach the caller.
+    NSString *failure = nil;   // +1 while set; autoreleased once past the loop
+
+    while (!failure) {
+        @autoreleasepool {
+            NSData *chunk = nil;
+            @try {
+                chunk = [outRead readDataOfLength:kCCGzipChunkBytes];
+            } @catch (NSException *ex) {
+                failure = [[NSString stringWithFormat:@"Read error while decompressing %@: %@",
+                            [archivePath lastPathComponent], ex.reason ?: @"unknown"] retain];
+                break;
+            }
+            if (chunk.length == 0) break;               // EOF
+
+            total += (unsigned long long)chunk.length;
+            if (total > kCCMaxDecompressedBytes) {
+                failure = [[NSString stringWithFormat:
+                            @"Refusing to expand %@: output exceeds %llu MB (possible decompression bomb).",
+                            [archivePath lastPathComponent],
+                            kCCMaxDecompressedBytes / (1024ULL * 1024ULL)] retain];
+                break;
+            }
+            @try {
+                [outFile writeData:chunk];
+            } @catch (NSException *ex) {
+                failure = [[NSString stringWithFormat:@"Failed writing %@: %@",
+                            outPath, ex.reason ?: @"unknown"] retain];
+                break;
+            }
+        }
+    }
+    [failure autorelease];   // no-op when nil
+
+    if (failure) [task terminate];
+    [outRead closeFile];
     [task waitUntilExit];
-    NSData *errData = [[errPipe fileHandleForReading] readDataToEndOfFile];
-    if (task.terminationStatus != 0) {
-        NSString *stderrStr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding];
-        if (stderrStr.length == 0) stderrStr = @"gzip failed";
-        if (errorText) *errorText = stderrStr;
+    dispatch_semaphore_wait(errDone, DISPATCH_TIME_FOREVER);
+    dispatch_release(errDone);
+    [errData autorelease];
+    [outFile closeFile];
+
+    if (failure) {
+        [fm removeItemAtPath:outPath error:nil];        // our own partial output, not user data
+        if (errorText) *errorText = failure;
         return false;
     }
 
-    NSError *writeErr = nil;
-    if (![data writeToFile:outPath options:NSDataWritingAtomic error:&writeErr]) {
-        if (errorText) *errorText = [NSString stringWithFormat:@"Failed writing %@: %@", outPath, writeErr.localizedDescription ?: @"unknown"];
+    if (task.terminationStatus != 0) {
+        [fm removeItemAtPath:outPath error:nil];
+        NSString *stderrStr = [[NSString alloc] initWithData:(errData ?: [NSData data])
+                                                    encoding:NSUTF8StringEncoding];
+        if (stderrStr.length == 0) stderrStr = @"gzip failed";
+        if (errorText) *errorText = stderrStr;
         return false;
     }
     return true;
@@ -1750,12 +1882,18 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
                 [self appendDebugLine:[NSString stringWithFormat:@"[extract] Warning: could not fix permissions on %@", topOutput]];
             }
 
-            NSMutableArray<NSString *> *pendingDirs = [NSMutableArray arrayWithObject:topOutput];
+            // Depth-bounded worklist. The walk previously had no limit: an archive
+            // containing itself recursed until the disk filled. 50 matches the
+            // Python tool this was ported from.
+            NSMutableArray<NSDictionary *> *pendingDirs =
+                [NSMutableArray arrayWithObject:@{@"path": topOutput, @"depth": @(0)}];
             NSInteger nestedCount = 0;
 
             while (pendingDirs.count > 0) {
-                NSString *dir = pendingDirs.firstObject;
+                NSDictionary *item = pendingDirs.firstObject;
                 [pendingDirs removeObjectAtIndex:0];
+                NSString *dir    = item[@"path"];
+                NSInteger depth  = [item[@"depth"] integerValue];
 
                 NSDirectoryEnumerator *en = [fm enumeratorAtURL:[NSURL fileURLWithPath:dir]
                                       includingPropertiesForKeys:@[NSURLIsDirectoryKey]
@@ -1777,8 +1915,12 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
                         NSString *parentDir = [p stringByDeletingLastPathComponent];
                         NSString *gzErr = nil;
                         if (ccExtractGzipFile(p, parentDir, &gzErr)) {
-                            [fm removeItemAtPath:p error:nil];
-                            [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested: %@ -> extracted", [p lastPathComponent]]];
+                            NSString *trashErr = nil;
+                            if (ccTrashItemAtPath(p, NULL, &trashErr)) {
+                                [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested: %@ -> extracted (original to Trash)", [p lastPathComponent]]];
+                            } else {
+                                [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested: %@ -> extracted (original kept: %@)", [p lastPathComponent], trashErr ?: @"unknown"]];
+                            }
                         } else {
                             [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested failed (%@): %@", [p lastPathComponent], gzErr ?: @"unknown"]];
                         }
@@ -1797,8 +1939,16 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
                             [self appendDebugLine:[NSString stringWithFormat:@"[extract] Warning: could not fix permissions on nested %@", nestedOut]];
                         }
                         nestedCount++;
-                        [fm removeItemAtPath:p error:nil];
-                        [pendingDirs addObject:nestedOut];
+                        NSString *trashErr = nil;
+                        if (!ccTrashItemAtPath(p, NULL, &trashErr)) {
+                            [self appendDebugLine:[NSString stringWithFormat:@"[extract] Kept %@ (could not move to Trash: %@)", [p lastPathComponent], trashErr ?: @"unknown"]];
+                        }
+                        if (depth + 1 < kCCMaxNestingDepth) {
+                            [pendingDirs addObject:@{@"path": nestedOut, @"depth": @(depth + 1)}];
+                        } else {
+                            [self appendDebugLine:[NSString stringWithFormat:@"[extract] Depth limit (%ld) reached; not descending into %@",
+                                                  (long)kCCMaxNestingDepth, [nestedOut lastPathComponent]]];
+                        }
                         [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested: %@ -> %@", [p lastPathComponent], [nestedOut lastPathComponent]]];
                     } else {
                         [self appendDebugLine:[NSString stringWithFormat:@"[extract] Nested failed (%@): %@", [p lastPathComponent], nestedErr ?: @"unknown"]];
@@ -1806,14 +1956,19 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
                 }
             }
 
-            NSError *removeErr = nil;
-            if ([fm fileExistsAtPath:archivePath] && ![fm removeItemAtPath:archivePath error:&removeErr]) {
-                [self appendDebugLine:[NSString stringWithFormat:@"[extract] Warning: could not remove source %@ (%@)",
-                                      [archivePath lastPathComponent],
-                                      removeErr.localizedDescription ?: @"unknown"]];
-            } else {
-                [self appendDebugLine:[NSString stringWithFormat:@"[extract] Source removed: %@",
-                                      [archivePath lastPathComponent]]];
+            // The archive the user picked is their own file, and it may be the only
+            // copy. This used to unlink it outright, with nothing in the open panel
+            // warning that it would be destroyed; the Trash keeps that recoverable.
+            if ([fm fileExistsAtPath:archivePath]) {
+                NSString *trashErr = nil, *landed = nil;
+                if (ccTrashItemAtPath(archivePath, &landed, &trashErr)) {
+                    [self appendDebugLine:[NSString stringWithFormat:@"[extract] Source moved to Trash: %@%@",
+                                          [archivePath lastPathComponent],
+                                          landed.length ? [NSString stringWithFormat:@" (recover from %@)", landed] : @""]];
+                } else {
+                    [self appendDebugLine:[NSString stringWithFormat:@"[extract] Kept source %@ (could not move to Trash: %@)",
+                                          [archivePath lastPathComponent], trashErr ?: @"unknown"]];
+                }
             }
 
             [self appendDebugLine:[NSString stringWithFormat:@"[extract] Completed: %@ (%ld nested extracted)", [topOutput lastPathComponent], (long)nestedCount]];
@@ -2421,9 +2576,12 @@ extern "C" NPP_EXPORT void setInfo(NppData data) {
                            sizeof(buf), (intptr_t)buf);
     std::string configDir = buf;
     if (configDir.empty() || configDir[0] != '/') {
+        // Only reached if the host doesn't answer NPPM_GETPLUGINSCONFIGDIR. This
+        // used to name ~/.notepad++/plugins/Config — a pre-rebrand path the host
+        // abandoned, so writing here silently re-created a dead directory.
         const char *home = getenv("HOME");
         configDir = home
-            ? std::string(home) + "/.notepad++/plugins/Config"
+            ? std::string(home) + "/Library/Application Support/Nextpad++/plugins/Config"
             : ".";
     }
 
