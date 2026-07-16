@@ -6,9 +6,17 @@ SmartHighlight plugin for Nextpad++ (macOS):
 - Cisco log parsing — Q.850 cause codes, DTMF blocks, X.509 / SAML decoding
 - Nested archive extractor
 
-Forked from [tonynupe/SmartHighlightNPP](https://github.com/tonynupe/SmartHighlightNPP)
-at tag `1.0.4` (commit `3446331`). The first commit here is that source verbatim,
-so `git log` shows exactly what changed and why.
+## Credits
+
+Written by **Anthony Nunez** ([@tonynupe](https://github.com/tonynupe)) — original:
+[tonynupe/SmartHighlightNPP](https://github.com/tonynupe/SmartHighlightNPP). It is a
+port of his Sublime Text package [tonynupe/CiscoCollab](https://github.com/tonynupe/CiscoCollab).
+All of the plugin's functionality is his work.
+
+This fork exists so the artifact users download is built from source that can be
+reviewed and reproduced, and to fix the issues listed below. Forked at tag `1.0.4`
+(commit `3446331`); the first commit here is that source **verbatim**, so `git log`
+shows exactly what was changed and why.
 
 ## Naming
 
@@ -80,10 +88,18 @@ absolute paths), no dynamic code loading, no obfuscation. Path traversal is
 contained — `tar` refuses `..` and symlink members, `ditto` normalises them into
 the destination, and `NSDirectoryEnumerator` does not follow directory symlinks.
 
+## Requirements
+
+Nextpad++ **1.0.8 or newer**. "Install/Update Cisco Language (UDL)" writes to
+`~/Library/Application Support/Nextpad++/userDefineLangs`, which is only the host's
+config directory from 1.0.8 onward (PR #211); on 1.0.7 that feature would write to
+a path the host does not read.
+
 ## License
 
-⚠️ **Unresolved.** Upstream ships no LICENSE and no copyright notice in any file,
-which means no rights are granted by default. `NppPluginInterfaceMac.h` is derived
-from the Nextpad++ host (GPL). This needs the author to state a license before the
-plugin is distributed — it is deliberately not decided here, since the copyright
-is his, not ours.
+⚠️ **Unresolved — pending the author.** The upstream repository ships no LICENSE
+and carries no copyright notice in any file, so no rights are formally granted.
+Copyright in this code is Anthony Nunez's, not this project's, and no license is
+asserted here on his behalf. `NppPluginInterfaceMac.h` derives from the Nextpad++
+host (GPL). A license statement from the author is being requested; this note stays
+until he provides one.
