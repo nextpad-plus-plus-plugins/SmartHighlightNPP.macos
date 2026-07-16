@@ -95,10 +95,25 @@ struct SCNotification {
 #define NPPN_LANGCHANGED    (NPPN_FIRST + 11)
 
 // ── Notepad++ messages (subset) ──────────────────────────────────────────────
-#define NPPM_BASE                     1024
-#define NPPM_GETCURRENTSCINTILLA      (NPPM_BASE + 4)
-#define NPPM_GETPLUGINSCONFIGDIR      (NPPM_BASE + 97)
-#define NPPM_GETCURRENTFILENAME       (NPPM_BASE + 38)
-#define NPPM_GETFULLCURRENTPATH       (NPPM_BASE + 35)
-#define NPPM_MENUCOMMAND              (NPPM_BASE + 48)
-#define NPPM_ADDTOOLBARICON_FORDARKMODE (NPPM_BASE + 101)
+// These must match the host's src/NppPluginInterfaceMac.h exactly. They used to
+// derive from `NPPM_BASE 1024` — that is WM_USER, missing the +1000 that makes
+// NPPMSG — and several offsets were wrong too. The host matched no case, left the
+// out-parameter untouched, and the plugin silently fell back instead of failing:
+//   NPPM_GETPLUGINSCONFIGDIR  sent 1121, host handles 2070 -> config dir always
+//                             fell back (upstream: to the dead ~/.notepad++)
+//   NPPM_GETCURRENTSCINTILLA  sent 1028, host handles 2028 -> `which` stayed -1,
+//                             so the second split view was never addressed
+// NPPMSG is spelled exactly as in SmartHighlight.mm so the two agree textually.
+#ifndef NPPMSG
+#define NPPMSG                          (0x0400 + 1000)
+#endif
+#ifndef RUNCOMMAND_USER
+#define RUNCOMMAND_USER                 (0x0400 + 3000)
+#endif
+
+#define NPPM_GETCURRENTSCINTILLA        (NPPMSG + 4)
+#define NPPM_GETPLUGINSCONFIGDIR        (NPPMSG + 46)
+#define NPPM_MENUCOMMAND                (NPPMSG + 48)
+#define NPPM_ADDTOOLBARICON_FORDARKMODE (NPPMSG + 101)
+#define NPPM_GETNPPSETTINGSDIRPATH      (NPPMSG + 119)
+#define NPPM_GETFULLCURRENTPATH         (RUNCOMMAND_USER + 1)

@@ -152,6 +152,11 @@ static bool ccIsSupportedArchivePath(NSString *path) {
            ccHasSuffixCI(path, @".rar");
 }
 
+// Host handle + sendMessage, populated by setInfo. Declared here rather than with
+// the rest of the global state below because the helpers above need to ask the
+// host where its settings directory is.
+static NppData g_nppData = {};
+
 static NSString *ccCiscoUdlXml() {
     return @"<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n"
            "<NotepadPlus>\n"
@@ -220,10 +225,27 @@ static NSString *ccCiscoUdlXml() {
            "</NotepadPlus>\n";
 }
 
+// userDefineLangs lives under the host's settings directory, which is
+// cloud-redirectable (the host resolves it as `cloud ?: local`). Asking the host
+// is the only way to land where it actually reads: a hardcoded Application
+// Support path silently writes to the wrong place once "Settings on cloud" is on,
+// and the UDL simply never appears in the Language menu.
 static NSString *ccNextpadUserDefineLangDir() {
-    NSString *home = NSHomeDirectory();
-    if (!home || home.length == 0) return nil;
-    return [home stringByAppendingPathComponent:@"Library/Application Support/Nextpad++/userDefineLangs"];
+    char buf[4096] = {};
+    if (g_nppData._sendMessage && g_nppData._nppHandle) {
+        g_nppData._sendMessage(g_nppData._nppHandle,
+                               NPPM_GETNPPSETTINGSDIRPATH,
+                               sizeof(buf), (intptr_t)buf);
+    }
+
+    NSString *settings = (buf[0] == '/') ? [NSString stringWithUTF8String:buf] : nil;
+    if (settings.length == 0) {
+        // Only if the host does not answer.
+        NSString *home = NSHomeDirectory();
+        if (home.length == 0) return nil;
+        settings = [home stringByAppendingPathComponent:@"Library/Application Support/Nextpad++"];
+    }
+    return [settings stringByAppendingPathComponent:@"userDefineLangs"];
 }
 
 static void ccShowInfoAlert(NSString *title, NSString *message) {
@@ -828,7 +850,6 @@ struct HighlightEntry {
 };
 
 // Global state
-static NppData g_nppData = {};
 static std::string g_configPath;
 static std::vector<HighlightEntry>                  gHighlights;
 static std::unordered_map<int, std::set<intptr_t>>  gIndicatorStarts;
@@ -2508,7 +2529,7 @@ static void cmd_installCiscoUdlLanguage() {
         NSString *dir = ccNextpadUserDefineLangDir();
         if (!dir) {
             ccShowInfoAlert(@"CiscoCollab Language",
-                            @"No se pudo resolver el directorio userDefineLangs.");
+                            @"Could not resolve the userDefineLangs directory.");
             return;
         }
 
@@ -2519,8 +2540,8 @@ static void cmd_installCiscoUdlLanguage() {
                                                         error:&mkdirErr];
         if (mkdirErr) {
             ccShowInfoAlert(@"CiscoCollab Language",
-                            [NSString stringWithFormat:@"No se pudo crear %@\n%@",
-                             dir, mkdirErr.localizedDescription ?: @"error desconocido"]);
+                            [NSString stringWithFormat:@"Could not create %@\n%@",
+                             dir, mkdirErr.localizedDescription ?: @"unknown error"]);
             return;
         }
 
@@ -2532,15 +2553,15 @@ static void cmd_installCiscoUdlLanguage() {
                                           error:&writeErr];
         if (!ok || writeErr) {
             ccShowInfoAlert(@"CiscoCollab Language",
-                            [NSString stringWithFormat:@"No se pudo escribir %@\n%@",
-                             path, writeErr.localizedDescription ?: @"error desconocido"]);
+                            [NSString stringWithFormat:@"Could not write %@\n%@",
+                             path, writeErr.localizedDescription ?: @"unknown error"]);
             return;
         }
 
         NSString *msg = [NSString stringWithFormat:
-            @"Lenguaje CiscoCollab instalado/actualizado en:\n%@\n\n"
-             "Luego en Nextpad++ selecciona:\nLanguage -> CiscoCollab\n\n"
-             "Si no aparece, reinicia Nextpad++.", path];
+            @"CiscoCollab language installed/updated at:\n%@\n\n"
+             "Now choose Language -> CiscoCollab in Nextpad++.\n\n"
+             "If it does not appear, restart Nextpad++.", path];
         ccShowInfoAlert(@"CiscoCollab Language", msg);
     }
 }

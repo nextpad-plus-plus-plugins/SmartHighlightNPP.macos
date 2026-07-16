@@ -88,6 +88,33 @@ absolute paths), no dynamic code loading, no obfuscation. Path traversal is
 contained — `tar` refuses `..` and symlink members, `ditto` normalises them into
 the destination, and `NSDirectoryEnumerator` does not follow directory symlinks.
 
+## Note: the CiscoCollab UDL could live in the UDL index instead
+
+"Install/Update Cisco Language (UDL)" writes an embedded `CiscoCollab.xml` straight
+into `userDefineLangs/`, bypassing UDL Admin and the [nppUDLList](https://github.com/nextpad-plus-plus/nppUDLList)
+index entirely. It is a candidate to be pulled into that index instead.
+
+The index already contains a **mechanically converted** copy of the same language:
+`UDLs-Sublime/Cisco.xml`, produced by `tools/sublime2udl.py` from the author's
+Sublime package. Both have the same 28 keyword groups and the same extension list
+(`cfg txt gzo log`), so they share a lineage — but that converted copy is **not
+listed in `udl-list.json`**, and it is the weaker of the two:
+
+```
+Comments   plugin  : 00! 01 02 03 04
+           Cisco.xml: 00  01 02 03 04
+```
+
+The plugin's hand-tuned version declares `!` as the line-comment character — the
+comment marker in Cisco IOS configs — which the conversion dropped, along with the
+number prefixes (`+-[({<`). 13 of 28 groups are identical; the other 15 differ, and
+in every case the plugin's is the more complete.
+
+So the plugin's UDL is worth publishing into `udl-list.json` in its own right (it
+would improve the existing `Cisco.xml`). If it is, this plugin could drop the UDL
+writer and its menu item, and let UDL Admin own installation, updates, dark-mode
+handling and Global Override. That is the author's call — the UDL is his work.
+
 ## Requirements
 
 Nextpad++ **1.0.8 or newer**. "Install/Update Cisco Language (UDL)" writes to

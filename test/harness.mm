@@ -196,6 +196,46 @@ static void test_config_path(void) {
        @"falls back to Application Support");
 }
 
+// ── 9. message ids must match the host ───────────────────────────────────────
+// These pin the numbers the host actually dispatches on. The header previously
+// derived them from a base that was 1000 too low, so the host matched no case,
+// never wrote the out-parameter, and the plugin fell back silently — no crash,
+// no error, just quietly wrong. Nothing failed loudly enough to notice.
+static void test_message_ids(void) {
+    printf("\n[9] plugin message ids == host's\n");
+    ok(NPPMSG                      == 2024, @"NPPMSG == 2024 (WM_USER + 1000)");
+    ok(NPPM_GETCURRENTSCINTILLA    == 2028, @"NPPM_GETCURRENTSCINTILLA == 2028");
+    ok(NPPM_GETPLUGINSCONFIGDIR    == 2070, @"NPPM_GETPLUGINSCONFIGDIR == 2070 (was 1121)");
+    ok(NPPM_GETNPPSETTINGSDIRPATH  == 2143, @"NPPM_GETNPPSETTINGSDIRPATH == 2143");
+    ok(NPPM_DMM_REGISTERPANEL      == 2525, @"NPPM_DMM_REGISTERPANEL == 2525");
+    ok(NPPM_DMM_UNREGISTERPANEL    == 2528, @"NPPM_DMM_UNREGISTERPANEL == 2528");
+}
+
+// ── 10. UDL dir resolves through the host, and degrades sanely ───────────────
+static void test_udl_dir(void) {
+    printf("\n[10] UDL directory resolution\n");
+    // g_nppData is zeroed here (no host), so this exercises the fallback path.
+    NSString *d = ccNextpadUserDefineLangDir();
+    ok(d.length > 0, @"returns a path with no host attached");
+    ok([d hasSuffix:@"userDefineLangs"], @"ends in userDefineLangs");
+    ok([d containsString:@"Application Support/Nextpad++"], @"fallback is Application Support");
+    ok(![d containsString:@".notepad++"], @"never the pre-rebrand ~/.notepad++");
+
+    NSString *src = [NSString stringWithContentsOfFile:@"SmartHighlight.mm"
+                                              encoding:NSUTF8StringEncoding error:nil];
+    ok([src containsString:@"NPPM_GETNPPSETTINGSDIRPATH"], @"asks the host for the settings dir");
+}
+
+// ── 11. user-facing strings are English ──────────────────────────────────────
+static void test_no_spanish(void) {
+    printf("\n[11] user-facing strings\n");
+    NSString *src = [NSString stringWithContentsOfFile:@"SmartHighlight.mm"
+                                              encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *s in @[@"No se pudo", @"error desconocido", @"Lenguaje", @"reinicia"]) {
+        ok(![src containsString:s], ([NSString stringWithFormat:@"no Spanish string \"%@\"", s]));
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);   // unbuffered: keep output if a test crashes
@@ -208,6 +248,9 @@ int main(void) {
         test_trash();
         test_traversal();
         test_config_path();
+        test_message_ids();
+        test_udl_dir();
+        test_no_spanish();
         printf("\n──────────────────────────────\n%d passed, %d failed\n", gPass, gFail);
         return gFail == 0 ? 0 : 1;
     }
