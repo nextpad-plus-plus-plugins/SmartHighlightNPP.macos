@@ -82,7 +82,8 @@ if [ "${1:-}" = "--no-zip" ]; then
 fi
 
 echo "==> Packaging"
-ZIP="$OUT/${NAME}_v${VERSION}.zip"
+# Catalog convention: <folder-name>v<version>.zip (e.g. NextZipv1.0.0.zip).
+ZIP="$OUT/${NAME}v${VERSION}.zip"
 # Strip extended attributes and skip resource forks, or ditto stores an
 # AppleDouble ._ sidecar next to the dylib inside the zip.
 xattr -cr "$STAGE"
