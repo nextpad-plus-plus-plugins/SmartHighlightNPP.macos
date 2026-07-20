@@ -124,9 +124,5 @@ a path the host does not read.
 
 ## License
 
-⚠️ **Unresolved — pending the author.** The upstream repository ships no LICENSE
-and carries no copyright notice in any file, so no rights are formally granted.
-Copyright in this code is Anthony Nunez's, not this project's, and no license is
-asserted here on his behalf. `NppPluginInterfaceMac.h` derives from the Nextpad++
-host (GPL). A license statement from the author is being requested; this note stays
-until he provides one.
+Licensed under the **GNU General Public License v2.0 or later**. See
+the [LICENSE](LICENSE) file.
