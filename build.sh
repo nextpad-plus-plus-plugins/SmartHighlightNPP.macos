@@ -1,10 +1,10 @@
 #!/bin/sh
 # Build + package SmartHighlightNPP for Nextpad++ (macOS).
 #
-# Produces build/SmartHighlightNPP/SmartHighlightNPP.dylib and a
-# zip laid out the way the host loader expects: <folder>/<folder>.dylib. The
-# folder name and the dylib name are not independent — NppPluginManager.mm builds
-# the dylib name from the directory name, so a mismatch is skipped silently.
+# Produces build/SmartHighlightNPP/SmartHighlightNPP.dylib plus toolbar assets,
+# and a zip laid out the way the host loader expects: <folder>/<folder>.dylib.
+# The folder name and the dylib name are not independent — NppPluginManager.mm
+# builds the dylib name from the directory name, so a mismatch is skipped silently.
 #
 # Usage:  ./build.sh            build + verify + package
 #         ./build.sh --no-zip   build + verify only
@@ -16,6 +16,8 @@ SRC="SmartHighlight.mm"
 OUT="build"
 STAGE="$OUT/$NAME"
 DYLIB="$STAGE/$NAME.dylib"
+TOOLBAR_LIGHT="toolbar.png"
+TOOLBAR_DARK="toolbar_dark.png"
 
 cd "$(dirname "$0")"
 rm -rf "$OUT"
@@ -84,16 +86,24 @@ fi
 echo "==> Packaging"
 # Catalog convention: <folder-name>v<version>.zip (e.g. NextZipv1.0.0.zip).
 ZIP="$OUT/${NAME}v${VERSION}.zip"
+# Toolbar icons sit at the plugin root; the host loads them when it receives
+# NPPM_ADDTOOLBARICON_FORDARKMODE with lParam == 0.
+for icon in "$TOOLBAR_LIGHT" "$TOOLBAR_DARK"; do
+    [ -f "$icon" ] || { echo "FAIL: missing toolbar asset $icon"; exit 1; }
+    cp "$icon" "$STAGE/$icon"
+done
 # Strip extended attributes and skip resource forks, or ditto stores an
 # AppleDouble ._ sidecar next to the dylib inside the zip.
 xattr -cr "$STAGE"
 ( cd "$OUT" && /usr/bin/ditto -c -k --keepParent --norsrc --noextattr "$NAME" "$(basename "$ZIP")" )
 
-# The zip must contain exactly <folder>/<folder>.dylib.
-listing=$(unzip -Z1 "$ZIP" | grep -v '/$')
-[ "$listing" = "$NAME/$NAME.dylib" ] \
+# The zip must contain the dylib plus the toolbar assets at plugin root.
+listing=$(unzip -Z1 "$ZIP" | grep -v '/$' | sort)
+expected=$(printf '%s\n' "$NAME/$NAME.dylib" "$NAME/$TOOLBAR_LIGHT" "$NAME/$TOOLBAR_DARK" | sort)
+[ "$listing" = "$expected" ] \
     || { echo "FAIL: unexpected zip layout:"; echo "$listing"; exit 1; }
-echo "    layout: $listing"
+echo "    layout:"
+printf '      %s\n' $listing
 
 echo
 echo "zip   : $ZIP"

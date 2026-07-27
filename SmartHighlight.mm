@@ -2651,6 +2651,14 @@ extern "C" NPP_EXPORT void beNotified(SCNotification *notif) {
             // NOTE: Do NOT call showPanel() here - it can cause startup crashes.
             // Panel is shown only via manual menu trigger (cmd_showPanel).
             break;
+        case NPPN_TBMODIFICATION:
+            // lParam 0 tells the host to load toolbar.png / toolbar_dark.png from
+            // the plugin directory for this command.
+            g_nppData._sendMessage(g_nppData._nppHandle,
+                                   NPPM_ADDTOOLBARICON_FORDARKMODE,
+                                   (uintptr_t)g_funcItem[0]._cmdID,
+                                   0);
+            break;
         case NPPN_BUFFERACTIVATED:
         case NPPN_FILEOPENED:
             requestDeferredApply(6);
