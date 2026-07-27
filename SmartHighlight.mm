@@ -855,6 +855,7 @@ static std::vector<HighlightEntry>                  gHighlights;
 static std::unordered_map<int, std::set<intptr_t>>  gIndicatorStarts;
 static std::atomic<int>                             gApplyTicket{0};
 static bool                                         gCiscoNativeLanguageEnabled = false;
+static bool                                         gAutoRotateColor = true;
 static uintptr_t                                    gLastParsedHandle = 0;
 static intptr_t                                     gLastParsedLineStart = -1;
 static std::string                                  gLastParsedLineText;
@@ -1223,6 +1224,7 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
 @property (strong) NSButton           *btnOpen, *btnSave;
 @property (strong) NSButton           *btnDebugParse, *btnDebugClear;
 @property (strong) NSButton           *btnDebugWrap;
+@property (strong) NSButton           *btnAutoColor;
 @property (strong) NSButton           *btnSamlFormat;
 @property (strong) NSButton           *btnExtractNested;
 @property (strong) NSTextView         *debugTextView;
@@ -1303,6 +1305,14 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
     }
     [_colorDropdown selectItemAtIndex:0];
     [_colorDropdown.widthAnchor constraintGreaterThanOrEqualToConstant:110].active = YES;
+
+    _btnAutoColor = [NSButton checkboxWithTitle:@"Auto color"
+                                         target:self
+                                         action:@selector(actionToggleAutoColor:)];
+    _btnAutoColor.font = [NSFont systemFontOfSize:12];
+    _btnAutoColor.toolTip = @"Automatically advance to the next color on each Add";
+    _btnAutoColor.state = gAutoRotateColor ? NSControlStateValueOn : NSControlStateValueOff;
+    _btnAutoColor.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1401,6 +1411,7 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
 
     NSStackView *topRow = [NSStackView stackViewWithViews:@[
         _colorDropdown,
+        _btnAutoColor,
         _btnAdd,
         _btnDelete,
         _btnNew,
@@ -1659,6 +1670,13 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
 
     saveHighlights();
     applySingleHighlight(INDICATOR_BASE + styleIdx, pattern);
+
+    // Auto-rotate: advance dropdown to next style after each successful Add.
+    if (gAutoRotateColor) {
+        int next = (styleIdx + 1) % MAX_STYLES;
+        [_colorDropdown selectItemAtIndex:next];
+    }
+
     [self reloadTable];
     NSInteger newRow = (NSInteger)gHighlights.size() - 1;
     [_tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)newRow]
@@ -1777,6 +1795,13 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
     (void)sender;
     self.debugWrapEnabled = !self.debugWrapEnabled;
     [self updateDebugWrapUI];
+}
+
+- (void)actionToggleAutoColor:(id)sender {
+    (void)sender;
+    NSButton *btn = (NSButton *)sender;
+    if ([btn isKindOfClass:[NSButton class]])
+        gAutoRotateColor = (btn.state == NSControlStateValueOn);
 }
 
 - (void)actionSamlFormat:(id)sender {
@@ -2650,14 +2675,6 @@ extern "C" NPP_EXPORT void beNotified(SCNotification *notif) {
             requestDeferredApply(12);
             // NOTE: Do NOT call showPanel() here - it can cause startup crashes.
             // Panel is shown only via manual menu trigger (cmd_showPanel).
-            break;
-        case NPPN_TBMODIFICATION:
-            // lParam 0 tells the host to load toolbar.png / toolbar_dark.png from
-            // the plugin directory for this command.
-            g_nppData._sendMessage(g_nppData._nppHandle,
-                                   NPPM_ADDTOOLBARICON_FORDARKMODE,
-                                   (uintptr_t)g_funcItem[0]._cmdID,
-                                   0);
             break;
         case NPPN_BUFFERACTIVATED:
         case NPPN_FILEOPENED:
