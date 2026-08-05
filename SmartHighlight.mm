@@ -563,18 +563,20 @@ static NSString *ccDtmfConfigMeaning(int code) {
     switch (code) {
         case 0: return @"Disabled";
         case 1: return @"BestEffort";
-        case 2: return @"Required";
+        case 2: return @"PreferOOB";
+        case 3: return @"Prefer2833";
+        case 4: return @"PreferBoth";
         default: return @"Unknown";
     }
 }
 
 static NSString *ccDtmfMethodMeaning(int code) {
     switch (code) {
-        case 0: return @"None";
-        case 1: return @"InBand";
-        case 2: return @"SIP INFO";
+        case 0: return @"NoDTMF";
+        case 1: return @"OOB";
+        case 2: return @"RFC2833";
         case 3: return @"OOB + RFC2833";
-        case 4: return @"KPML";
+        case 4: return @"Unknown";
         default: return @"Unknown";
     }
 }
