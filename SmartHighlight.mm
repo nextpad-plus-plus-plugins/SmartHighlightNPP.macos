@@ -63,6 +63,15 @@
 #define NPPM_DMM_HIDEPANEL          (NPPMSG + 503)
 #define NPPM_DMM_UNREGISTERPANEL    (NPPMSG + 504)
 #endif
+// NPPM_DMM_SETPANELINFO (host ≥ 1.1.0) — restore metadata so the host can
+// reopen the panel after a relaunch. Matches the host's NppPluginInterfaceMac.h.
+#ifndef NPPM_DMM_SETPANELINFO
+typedef struct NppPanelInfo {
+    const char *moduleName;   /* plugin folder/module name */
+    int32_t     cmdIndex;     /* FuncItem index of the show/toggle command */
+} NppPanelInfo;
+#define NPPM_DMM_SETPANELINFO       (NPPMSG + 505)
+#endif
 
 #import <Cocoa/Cocoa.h>
 
@@ -2503,6 +2512,20 @@ static void showPanel() {
                     NPPM_DMM_REGISTERPANEL,
                     (uintptr_t)v,
                     (intptr_t)"SmartHighlight");
+                if (gDockPanelHandle) {
+                    // Declare restore metadata so a panel visible at quit
+                    // reopens at the next launch via "Toggle SmartHighlight
+                    // Panel" (cmdIndex 0 — this toggle itself). Older hosts
+                    // return 0; ignored.
+                    NppPanelInfo info;
+                    info.moduleName = "SmartHighlightNPP";
+                    info.cmdIndex   = 0;
+                    g_nppData._sendMessage(
+                        g_nppData._nppHandle,
+                        NPPM_DMM_SETPANELINFO,
+                        (uintptr_t)gDockPanelHandle,
+                        (intptr_t)&info);
+                }
             }
         }
 

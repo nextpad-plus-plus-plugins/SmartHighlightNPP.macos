@@ -11,7 +11,7 @@
 set -eu
 
 NAME="SmartHighlightNPP"
-VERSION="1.0.6"
+VERSION="1.0.7"
 SRC="SmartHighlight.mm"
 OUT="build"
 STAGE="$OUT/$NAME"
