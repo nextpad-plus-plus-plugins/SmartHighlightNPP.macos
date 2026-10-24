@@ -48,6 +48,11 @@
 #define SCI_SETINDICATORVALUE       2502
 #define SCI_INDICATORFILLRANGE      2504
 #define SCI_INDICATORCLEARRANGE     2505
+#define SCI_INDICATORVALUEAT        2506
+#define SCI_INDICATOREND            2509
+#define SCI_INDICSETFLAGS           2684
+#define SC_INDICFLAG_VALUEFORE      1
+#define SC_INDICVALUEBIT            0x1000000
 #define INDIC_STRAIGHTBOX           8
 
 // Scintilla notifications (subset)
@@ -71,6 +76,13 @@ typedef struct NppPanelInfo {
     int32_t     cmdIndex;     /* FuncItem index of the show/toggle command */
 } NppPanelInfo;
 #define NPPM_DMM_SETPANELINFO       (NPPMSG + 505)
+#endif
+// Host ID-layout probe + indicator allocator (both standard NPP messages).
+#ifndef NPPM_GETBOOKMARKID
+#define NPPM_GETBOOKMARKID          (NPPMSG + 111)
+#endif
+#ifndef NPPM_ALLOCATEINDICATOR
+#define NPPM_ALLOCATEINDICATOR      (NPPMSG + 113)
 #endif
 
 #import <Cocoa/Cocoa.h>
@@ -96,7 +108,6 @@ typedef struct NppPanelInfo {
 
 // Style palette
 static const int MAX_STYLES     = 10;
-static const int INDICATOR_BASE = 15;
 
 // Keep style-to-indicator mapping explicit to avoid collisions with host/editor slots.
 static const int kStyleIndicator[MAX_STYLES] = {
@@ -892,7 +903,54 @@ static intptr_t sci(NppHandle h, uint32_t msg,
     return g_nppData._sendMessage(h, msg, w, l);
 }
 
+// ── host ID layout ───────────────────────────────────────────────────────
+// Legacy hosts (NPPM_GETBOOKMARKID == 24) leave the kStyleIndicator slots
+// free enough that the shipped 10-indicator spread works; keep it there.
+// Hosts with the remapped Windows-parity layout (GETBOOKMARKID == 20) own
+// 21-26 and 28-31, so there ALL ten styles multiplex onto ONE allocated
+// indicator via SC_INDICFLAG_VALUEFORE — the fill *value* carries the
+// style's color (| SC_INDICVALUEBIT); box style and alphas are shared,
+// which they already are across the palette, so it renders identically.
+// Everywhere else in this file "ind" stays the LOGICAL per-style slot
+// (kStyleIndicator[i]); only the three functions below translate it.
+static bool sLayoutResolved = false;
+static bool sRemappedLayout = false;
+static int  sMuxIndicator   = -1;
+
+static bool remappedLayout() {
+    if (sLayoutResolved) return sRemappedLayout;
+    sLayoutResolved = true;
+    sRemappedLayout = g_nppData._sendMessage(g_nppData._nppHandle,
+                                             NPPM_GETBOOKMARKID, 0, 0) == 20;
+    if (sRemappedLayout) {
+        int id = -1;
+        if (g_nppData._sendMessage(g_nppData._nppHandle, NPPM_ALLOCATEINDICATOR,
+                                   1, (intptr_t)&id) && id > 0)
+            sMuxIndicator = id;
+        else
+            sMuxIndicator = 27;   // pool exhausted: the one unowned new-layout slot
+    }
+    return sRemappedLayout;
+}
+
+// Style color for a logical style slot; -1 when `ind` is not a style slot
+// (e.g. the CC overlay slots), which in remapped mode must never be touched —
+// those numbers belong to the host there.
+static int colorForStyleSlot(int ind) {
+    for (int i = 0; i < MAX_STYLES; i++)
+        if (kStyleIndicator[i] == ind) return kStyleColor[i];
+    return -1;
+}
+
 static void setupIndicators(NppHandle h) {
+    if (remappedLayout()) {
+        sci(h, SCI_INDICSETSTYLE,        sMuxIndicator, INDIC_STRAIGHTBOX);
+        sci(h, SCI_INDICSETFLAGS,        sMuxIndicator, SC_INDICFLAG_VALUEFORE);
+        sci(h, SCI_INDICSETALPHA,        sMuxIndicator, 115);
+        sci(h, SCI_INDICSETOUTLINEALPHA, sMuxIndicator, 245);
+        sci(h, SCI_INDICSETUNDER,        sMuxIndicator, 0);
+        return;
+    }
     for (int i = 0; i < MAX_STYLES; i++) {
         int ind = indicatorForStyle(i);
         sci(h, SCI_INDICSETSTYLE,        ind, INDIC_STRAIGHTBOX);
@@ -904,19 +962,52 @@ static void setupIndicators(NppHandle h) {
 }
 
 static void fillRange(NppHandle h, int ind, intptr_t start, intptr_t len) {
-    sci(h, SCI_SETINDICATORCURRENT, ind);
-    sci(h, SCI_SETINDICATORVALUE,   1);
+    if (remappedLayout()) {
+        int color = colorForStyleSlot(ind);
+        if (color < 0) return;                      // not a style slot: never paint
+        sci(h, SCI_SETINDICATORCURRENT, sMuxIndicator);
+        sci(h, SCI_SETINDICATORVALUE,   (uintptr_t)(color | SC_INDICVALUEBIT));
+    } else {
+        sci(h, SCI_SETINDICATORCURRENT, ind);
+        sci(h, SCI_SETINDICATORVALUE,   1);
+    }
     sci(h, SCI_INDICATORFILLRANGE,  start, len);
     gIndicatorStarts[ind].insert(start);
 }
 
 static void clearIndicator(NppHandle h, int ind) {
+    if (remappedLayout()) {
+        int color = colorForStyleSlot(ind);
+        if (color < 0) return;      // CC overlay slots: host-owned there, hands off
+        // Clear only this style's ranges: walk the mux indicator's runs and
+        // clear the ones whose value carries this style's color.
+        const intptr_t want = (intptr_t)(color | SC_INDICVALUEBIT);
+        intptr_t len = sci(h, SCI_GETLENGTH);
+        sci(h, SCI_SETINDICATORCURRENT, sMuxIndicator);
+        intptr_t pos = 0;
+        while (pos < len) {
+            intptr_t v   = sci(h, SCI_INDICATORVALUEAT, sMuxIndicator, pos);
+            intptr_t end = sci(h, SCI_INDICATOREND,     sMuxIndicator, pos);
+            if (end <= pos) break;
+            if (v == want) sci(h, SCI_INDICATORCLEARRANGE, pos, end - pos);
+            pos = end;
+        }
+        gIndicatorStarts[ind].clear();
+        return;
+    }
     sci(h, SCI_SETINDICATORCURRENT, ind);
     sci(h, SCI_INDICATORCLEARRANGE, 0, sci(h, SCI_GETLENGTH));
     gIndicatorStarts[ind].clear();
 }
 
 static void clearAllIndicators(NppHandle h) {
+    if (remappedLayout()) {
+        sci(h, SCI_SETINDICATORCURRENT, sMuxIndicator);
+        sci(h, SCI_INDICATORCLEARRANGE, 0, sci(h, SCI_GETLENGTH));
+        for (int i = 0; i < MAX_STYLES; i++)
+            gIndicatorStarts[indicatorForStyle(i)].clear();
+        return;
+    }
     for (int i = 0; i < MAX_STYLES; i++)
     clearIndicator(h, indicatorForStyle(i));
 }
@@ -1666,7 +1757,7 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
             e.enabled = true;
             saveHighlights();
             if (!wasEnabled)
-                applySingleHighlight(INDICATOR_BASE + styleIdx, pattern);
+                applySingleHighlight(indicatorForStyle(styleIdx), pattern);
             [self reloadTable];
             return;
         }
@@ -1680,7 +1771,7 @@ static bool gotoPatternHighlight(bool forward, const std::string &pattern) {
     gHighlights.push_back(e);
 
     saveHighlights();
-    applySingleHighlight(INDICATOR_BASE + styleIdx, pattern);
+    applySingleHighlight(indicatorForStyle(styleIdx), pattern);
 
     // Auto-rotate: advance dropdown to next style after each successful Add.
     if (gAutoRotateColor) {
